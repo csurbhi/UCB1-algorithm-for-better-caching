@@ -10,12 +10,13 @@
 
 #define PROCNAME ("mlcache")
 #define MLCACHE_SCALE (100) /* the learning model's scaling factor */
+#define MLCACHE_REWARD (1)
 
 static unsigned long hits;
 static unsigned long misses;
 
 #ifdef CONFIG_MLCACHE_ACTIVE
-static unsigned long t;
+static unsigned long step;
 static long weight_average = 0;
 static long items_in_cache = 0;
 #endif
@@ -44,7 +45,7 @@ static void update_page_score(struct page *page, long by, bool hit) {
 				return;
 		if (hit) {
 				page->mlcache_score -= by;
-				page->mlcache_score = page->mlcache_score + upperBound(t-1, page->mlcache_plays) - upperBound(t, page->mlcache_plays)*page->mlcache_plays;
+				page->mlcache_score = page->mlcache_score + upperBound(step - 1, page->mlcache_plays) - upperBound(step, page->mlcache_plays)*page->mlcache_plays;
 		} else
 		{
 				if(weight_average == UINT_MAX)
@@ -98,7 +99,7 @@ static void penalize_pages(struct page *page, struct address_space *mapping)
 				continue;
 						
 
-		    update_page_score(p, -MLCACHE_SCALE, 0);
+		    update_page_score(p, -MLCACHE_REWARD, 0);
 
 			checked++;
 			if ((checked % 4096) != 0)
@@ -121,7 +122,7 @@ static void update_cache_scores(struct page *page, struct address_space *mapping
 
 		if (hit) {
 			/* we do not reduce the value of the other pages */
-				update_page_score(page, MLCACHE_SCALE, hit);
+				update_page_score(page, MLCACHE_REWARD, hit);
 				return;
 		}
 
@@ -212,7 +213,7 @@ static void mlcache_pageget(void *data, struct page *page, struct address_space 
 			misses++;
 
 #ifdef CONFIG_MLCACHE_ACTIVE
-			t++;
+			step++;
 			update_cache_scores(page, mapping, hit);
 			items_in_cache++;
 			update_average(page);
@@ -249,12 +250,9 @@ static int __init mlcache_init(void)
 
 		entry = proc_create("mlcache_stats", 0444, NULL, &filter_fops);
 		if (!entry)
-			return NULL;
+			return -ENOMEM;
 
 		hits = misses = 0;
-#ifdef CONFIG_MLCACHE_ACTIVE
-		t = 0;
-#endif
 		register_trace_mlcache_event(mlcache_pageget, NULL);
 		return 0;
 }
