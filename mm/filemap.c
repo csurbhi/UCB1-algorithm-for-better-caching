@@ -133,6 +133,12 @@ static int page_cache_tree_insert(struct address_space *mapping,
 		mapping->nrexceptional--;
 		if (shadowp)
 			*shadowp = p;
+		else {
+			page->mlcache_score = 0;
+			page->mlcache_plays = 0;
+			page->avg_access_evict = 0;
+			page->avg_cold_hot = 0;
+		}
 	}
 	__radix_tree_replace(&mapping->page_tree, node, slot, page,
 			     workingset_update_node, mapping);
@@ -806,11 +812,19 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 #ifdef CONFIG_MLCACHE_ACTIVE
 	int mlcache_score;
 	unsigned int mlcache_plays;
+	unsigned int avg_cold_hot;
+	unsigned int avg_access_evict;
 #endif
 
 	__SetPageLocked(page);
 	ret = __add_to_page_cache_locked(page, mapping, offset,
 					 gfp_mask, &shadow);
+
+
+#ifdef CONFIG_MLCACHE_ACTIVE
+	/* initialization */
+	page->mlcache_score = 0;
+#endif
 	if (unlikely(ret))
 		__ClearPageLocked(page);
 	else {
@@ -824,7 +838,7 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 		 */
 #ifdef CONFIG_MLCACHE_ACTIVE
 		if (!(gfp_mask & __GFP_WRITE) &&
-		    shadow && workingset_refault(shadow, &mlcache_score, &mlcache_plays)) {
+		    shadow && workingset_refault(shadow, &mlcache_score, &mlcache_plays, &avg_cold_hot, &avg_access_evict)) {
 #else
 		if (!(gfp_mask & __GFP_WRITE) &&
 		    shadow && workingset_refault(shadow)) {
@@ -833,6 +847,8 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 #ifdef CONFIG_MLCACHE_ACTIVE
 			page->mlcache_score = mlcache_score;
 			page->mlcache_plays = mlcache_plays;
+			page->avg_cold_hot = avg_cold_hot;
+			page->avg_access_evict = avg_access_evict++;
 #endif
 			workingset_activation(page);
 		} else
@@ -2206,7 +2222,7 @@ out:
 
 	*ppos = ((loff_t)index << PAGE_SHIFT) + offset;
 	file_accessed(filp);
-	trace_mlcache_event(index, current->pid, page, mapping, hit);
+	trace_mlcache_event(page, mapping, hit);
 	return written ? written : error;
 }
 
@@ -2625,6 +2641,11 @@ int filemap_page_mkwrite(struct vm_fault *vmf)
 	 */
 	set_page_dirty(page);
 	wait_for_stable_page(page);
+
+	/* hit will always be 1 here as page will be read using
+	* generic_file_buffered_read
+	**/
+	trace_mlcache_event(page, page->mapping, 1);
 out:
 	sb_end_pagefault(inode->i_sb);
 	return ret;
@@ -3056,6 +3077,11 @@ again:
 
 		status = a_ops->write_end(file, mapping, pos, bytes, copied,
 						page, fsdata);
+
+		/* hit will always be 1 here as page will be read using
+		 * generic_file_buffered_read
+		 **/
+		trace_mlcache_event(page, mapping, 1);
 		if (unlikely(status < 0))
 			break;
 		copied = status;

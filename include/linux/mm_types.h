@@ -221,8 +221,18 @@ struct page {
 #endif
 
 #ifdef CONFIG_MLCACHE_ACTIVE
+	/* Eviction is based on the mcache score */
 	long mlcache_score;
 	unsigned long mlcache_plays;
+	/* describes the average number of times the page was accessed after
+	 * eviction
+	 */
+	unsigned long avg_access_evict;
+	/* describes the average number of times the page moved from inactive
+	 * list to active list
+	 */
+	unsigned long avg_cold_hot; 
+
 #endif
 }
 /*

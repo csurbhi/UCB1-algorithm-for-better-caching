@@ -296,7 +296,7 @@ struct vma_swap_readahead {
 /* linux/mm/workingset.c */
 void *workingset_eviction(struct address_space *mapping, struct page *page);
 #ifdef CONFIG_MLCACHE_ACTIVE
-bool workingset_refault(void *shadow, int *mlcache_score, unsigned int *mlcache_plays);
+bool workingset_refault(void *shadow, int *mlcache_score, unsigned int *mlcache_plays, unsigned int *avg_cold_hot, unsigned int * avg_access_evict);
 #else
 bool workingset_refault(void *shadow);
 #endif

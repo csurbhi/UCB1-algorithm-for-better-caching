@@ -1535,10 +1535,17 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		page = lru_to_page(src);
 
 #ifdef CONFIG_MLCACHE_ACTIVE
+		/* looking into the lruvec list */
 		list_for_each(pos, src) {
 			curr_page = lru_to_page(pos);
-			if (curr_page && PageLRU(curr_page) && curr_page->mlcache_score > page->mlcache_score)
-				page = curr_page;
+			if (curr_page && PageLRU(curr_page)) {
+				if (curr_page->mlcache_score > page->mlcache_score)
+					page = curr_page;
+				else if(curr_page->avg_access_evict > page->avg_access_evict)
+					page = curr_page;
+				if(curr_page->avg_cold_hot > page->avg_cold_hot)
+					page = curr_page;
+			}
 		};
 #else
 		prefetchw_prev_lru_page(page, src, flags);
@@ -2061,6 +2068,7 @@ static void shrink_active_list(unsigned long nr_to_scan,
 		}
 
 		ClearPageActive(page);	/* we are de-activating */
+		page->avg_cold_hot++;
 		list_add(&page->lru, &l_inactive);
 	}
 

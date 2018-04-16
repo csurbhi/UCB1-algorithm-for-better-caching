@@ -16,8 +16,13 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 
-#define MLCACHE_SCORE_SHIFT (sizeof(unsigned int) * 8)
-#define MLCACHE_NUM_PLAYS_SHIFT (sizeof(unsigned short) * 8)
+#ifdef CONFIG_MLCACHE_ACTIVE
+#include "../drivers/mlcache/mlcache.h"
+#define MLCACHE_SCORE_SHIFT (sizeof(uint16_t) * 8)
+#define MLCACHE_NUM_PLAYS_SHIFT (sizeof(uint16_t) * 8)
+#define MLCACHE_AVG_EVICT_SHIFT (sizeof(uint16_t) * 8)
+#define MLCACHE_HOT_COLD_SHIFT (sizeof(uint8_t) * 8) 
+#endif 
 
 /*
  *		Double CLOCK lists
@@ -176,36 +181,68 @@ static unsigned int bucket_order __read_mostly;
 static void *pack_shadow(struct page *page, int memcgid, pg_data_t *pgdat, unsigned long eviction)
 {
 #ifdef CONFIG_MLCACHE_ACTIVE
-	unsigned int shadow_mlcache_score;
-	unsigned short shadow_mlcache_plays;
+	int16_t sh_mlcache_score;
+	uint16_t sh_mlcache_plays;
+	uint16_t sh_avg_access_evict;
+	uint8_t sh_avg_cold_hot;
 	unsigned long abs_score = page->mlcache_score;
+	unsigned long weighted_avg;
 
-	if (page->mlcache_score < 0)
-			abs_score = -1 * page->mlcache_score;
+#define INT16_T_MAX (((uint16_t)1 << 15) - 1)
+#define INT16_T_MIN (((uint32_t)1 << 16) - 1)
 
-	if (abs_score > UINT_MAX)
-			shadow_mlcache_score = UINT_MAX;
-	else
-			shadow_mlcache_score = abs_score;
-
-	/* negative score: lowest order bit == 0
-	 * positive score: lowest order bit == 1 */
-	if (page->mlcache_score < 0)
-			shadow_mlcache_score <<= 1;
-	else
-			shadow_mlcache_score = (abs_score << 1) | 1;
+	weighted_avg = get_mlcache_weighted_average();
+	if (abs_score > INT16_T_MAX) {
+			if((weighted_avg < abs_score) && ( weighted_avg > INT16_T_MAX)) {
+				/* later we will pick the weighted average - we trying to keep
+				 * whatever is maximally possible. You dont want to set the
+				 * score to INT16_T_MAX when it should be bigger the weighted
+				 * average and at the least be equal.
+				 */
+				sh_mlcache_score = 0;
+			} else {
+				sh_mlcache_score = INT16_T_MAX;
+			}
+	}
+	else if(abs_score < INT16_T_MIN) {
+			if((weighted_avg > abs_score) && (weighted_avg < INT16_T_MIN)){
+				/* we later collect the weighted avg which is smaller that
+				 * INT16_T_MIN. We do not want to be now bigger than the 
+				 * average by setting the score to INT16_T_MIN
+				 */
+				sh_mlcache_score = 0;
+			} else {
+				sh_mlcache_score = INT16_T_MIN;
+			}
+	} else {
+		/* Safe: in between min and max; */
+			sh_mlcache_score = abs_score;
+	}
 
 	if (page->mlcache_plays > USHRT_MAX)
-			shadow_mlcache_plays = USHRT_MAX;
+			sh_mlcache_plays = USHRT_MAX;
 	else
-			shadow_mlcache_plays = page->mlcache_plays;
+			sh_mlcache_plays = page->mlcache_plays;
+
+	if(page->avg_access_evict > USHRT_MAX)
+			sh_avg_access_evict = USHRT_MAX;
+	else
+			sh_avg_access_evict = page->avg_access_evict;
+
+	if(page->avg_cold_hot > U8_MAX)
+			sh_avg_cold_hot = U8_MAX;
+	else
+			sh_avg_cold_hot = page->avg_cold_hot;
 #endif
 
 	eviction >>= bucket_order;
 	eviction = (eviction << MEM_CGROUP_ID_SHIFT) | memcgid;
 #ifdef CONFIG_MLCACHE_ACTIVE
-	eviction = (eviction << MLCACHE_SCORE_SHIFT) | shadow_mlcache_score;
-	eviction = (eviction << MLCACHE_NUM_PLAYS_SHIFT) | shadow_mlcache_plays;
+	/* we store from MSB to LSB as: mlcache_score, mlcache_plays, avg_access_evict, avg_cold_hot */
+	eviction = (eviction << MLCACHE_SCORE_SHIFT) | sh_mlcache_score;
+	eviction = (eviction << MLCACHE_NUM_PLAYS_SHIFT) | sh_mlcache_plays;
+	eviction = (eviction << MLCACHE_AVG_EVICT_SHIFT) | sh_avg_access_evict;
+	eviction = (eviction << MLCACHE_HOT_COLD_SHIFT) | sh_avg_cold_hot;
 #endif
 	eviction = (eviction << NODES_SHIFT) | pgdat->node_id;
 	eviction = (eviction << RADIX_TREE_EXCEPTIONAL_SHIFT);
@@ -215,7 +252,9 @@ static void *pack_shadow(struct page *page, int memcgid, pg_data_t *pgdat, unsig
 
 #ifdef CONFIG_MLCACHE_ACTIVE
 static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
-			  int *mlcache_score, unsigned int *mlcache_plays, unsigned long *evictionp)
+			  int *mlcache_score, unsigned int *mlcache_plays,
+			  unsigned int *mlcache_hot_cold, unsigned int * mlcache_evict,
+			  unsigned long *evictionp)
 #else
 static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 			  unsigned long *evictionp)
@@ -224,17 +263,23 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 	unsigned long entry = (unsigned long)shadow;
 	int memcgid, nid;
 #ifdef CONFIG_MLCACHE_ACTIVE
-	unsigned int shadow_score;
-	unsigned short shadow_plays;
+	int16_t sh_mlcache_score;
+	uint16_t sh_mlcache_plays;
+	uint16_t sh_avg_access_evict;
+	uint8_t sh_avg_hot_cold;
 #endif
-
 	entry >>= RADIX_TREE_EXCEPTIONAL_SHIFT;
 	nid = entry & ((1UL << NODES_SHIFT) - 1);
 	entry >>= NODES_SHIFT;
 #ifdef CONFIG_MLCACHE_ACTIVE
-	shadow_plays = entry & ((1UL << MLCACHE_NUM_PLAYS_SHIFT) - 1);
+	/* we store from MSB to LSB as: mlcache_score, mlcache_plays, avg_access_evict, avg_cold_hot */
+	sh_avg_hot_cold = entry & ((1UL << MLCACHE_HOT_COLD_SHIFT) - 1);
+	entry >>= MLCACHE_HOT_COLD_SHIFT;
+	sh_avg_access_evict = entry & ((MLCACHE_AVG_EVICT_SHIFT) - 1);
+	entry >>= MLCACHE_AVG_EVICT_SHIFT;
+	sh_mlcache_plays = entry & ((1UL << MLCACHE_NUM_PLAYS_SHIFT) - 1);
 	entry >>= MLCACHE_NUM_PLAYS_SHIFT;
-	shadow_score = entry & ((1UL << MLCACHE_SCORE_SHIFT) - 1);
+	sh_mlcache_score = entry & ((1UL << MLCACHE_SCORE_SHIFT) - 1);
 	entry >>= MLCACHE_SCORE_SHIFT;
 #endif
 	memcgid = entry & ((1UL << MEM_CGROUP_ID_SHIFT) - 1);
@@ -245,12 +290,14 @@ static void unpack_shadow(void *shadow, int *memcgidp, pg_data_t **pgdat,
 	*evictionp = entry << bucket_order;
 
 #ifdef CONFIG_MLCACHE_ACTIVE
-	if ((shadow_score & 1) == 0)
-			*mlcache_score = -1 * (shadow_score >> 1);
-	else
-			*mlcache_score = (shadow_score >> 1);
+	if (sh_mlcache_score == 0)
+		*mlcache_score = get_mlcache_weighted_average();
+	else 
+		*mlcache_score = sh_mlcache_score;
 
-	*mlcache_plays = shadow_plays;
+	*mlcache_plays = sh_mlcache_plays;
+	*mlcache_evict = sh_avg_access_evict;
+	*mlcache_hot_cold = sh_avg_hot_cold;
 #endif
 }
 
@@ -290,7 +337,9 @@ void *workingset_eviction(struct address_space *mapping, struct page *page)
  * Returns %true if the page should be activated, %false otherwise.
  */
 #ifdef CONFIG_MLCACHE_ACTIVE
-bool workingset_refault(void *shadow, int *mlcache_score, unsigned int *mlcache_plays)
+bool workingset_refault(void *shadow, int *mlcache_score, 
+			unsigned int *mlcache_plays, unsigned int *avg_cold_hot, 
+			unsigned int * avg_access_evict)
 #else
 bool workingset_refault(void *shadow)
 #endif
@@ -305,7 +354,8 @@ bool workingset_refault(void *shadow)
 	int memcgid;
 
 #ifdef CONFIG_MLCACHE_ACTIVE
-	unpack_shadow(shadow, &memcgid, &pgdat, mlcache_score, mlcache_plays, &eviction);
+	unpack_shadow(shadow, &memcgid, &pgdat, mlcache_score, mlcache_plays,
+				  avg_cold_hot, avg_access_evict, &eviction);
 #else
 	unpack_shadow(shadow, &memcgid, &pgdat, &eviction);
 #endif
