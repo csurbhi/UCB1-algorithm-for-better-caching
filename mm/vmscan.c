@@ -2068,7 +2068,9 @@ static void shrink_active_list(unsigned long nr_to_scan,
 		}
 
 		ClearPageActive(page);	/* we are de-activating */
+#ifdef CONFIG_MLCACHE_ACTIVE
 		page->avg_cold_hot++;
+#endif
 		list_add(&page->lru, &l_inactive);
 	}
 

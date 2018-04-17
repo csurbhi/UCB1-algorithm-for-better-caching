@@ -133,12 +133,14 @@ static int page_cache_tree_insert(struct address_space *mapping,
 		mapping->nrexceptional--;
 		if (shadowp)
 			*shadowp = p;
+#ifdef CONFIG_MLCACHE_ACTIVE
 		else {
 			page->mlcache_score = 0;
 			page->mlcache_plays = 0;
 			page->avg_access_evict = 0;
 			page->avg_cold_hot = 0;
 		}
+#endif
 	}
 	__radix_tree_replace(&mapping->page_tree, node, slot, page,
 			     workingset_update_node, mapping);
