@@ -33,6 +33,9 @@ long get_mlcache_weighted_average()
 #ifdef CONFIG_MLCACHE_ACTIVE
 static unsigned long upperBound(int step, int numPlays) {
 		//indexing from 0
+		if (numPlays == 0)
+			numPlays = 1;
+
 		if (step !=0 && numPlays != 0) {
 				return int_sqrt(MLCACHE_SCALE * MLCACHE_SCALE * 2 * ilog2(MLCACHE_SCALE * MLCACHE_SCALE * (step+1)) / numPlays);
 		}
@@ -99,7 +102,11 @@ static void penalize_pages(struct page *page, struct address_space *mapping)
 				continue;
 						
 
-		    update_page_score(p, -MLCACHE_REWARD, 0);
+			/* We increase the reward/penalty of the other pages
+			 * hoping that the next time one of these pages
+			 * are selected
+			 */
+		    update_page_score(p, MLCACHE_REWARD, 0);
 
 			checked++;
 			if ((checked % 4096) != 0)
@@ -121,8 +128,10 @@ static void update_cache_scores(struct page *page, struct address_space *mapping
 		unsigned char penalize = 0;
 
 		if (hit) {
-			/* we do not reduce the value of the other pages */
-				update_page_score(page, MLCACHE_REWARD, hit);
+			/* we remove the page which has the highest reward. So on a hit we
+			 * reduce the reward/penalty
+			 */
+				update_page_score(page, -MLCACHE_REWARD, hit);
 				return;
 		}
 
@@ -169,12 +178,12 @@ static void update_cache_scores(struct page *page, struct address_space *mapping
 						 * penalize the other pages
 						 */
 						penalize = 1;
+		    			update_page_score(p, -MLCACHE_REWARD, 0);
 						break;
 					}
 						
 			}
 
-		    update_page_score(p, -MLCACHE_SCALE, 0);
 
 			checked++;
 			if ((checked % 4096) != 0)
