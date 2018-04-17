@@ -221,6 +221,12 @@ static void mlcache_pageget(void *data, struct page *page, struct address_space 
 		else
 			misses++;
 
+		if ((hits == ULONG_MAX) || (misses == ULONG_MAX)) {
+			hits = 0;
+			misses = 0;
+		}
+
+
 #ifdef CONFIG_MLCACHE_ACTIVE
 			step++;
 			update_cache_scores(page, mapping, hit);
@@ -230,6 +236,11 @@ static void mlcache_pageget(void *data, struct page *page, struct address_space 
 }
 
 static int mlcache_hits_show(struct seq_file *m, void *v) {
+#ifdef CONFIG_MLCACHE_ACTIVE
+		seq_printf(m, "MLCACHE active! ");
+#else
+		seq_printf(m, "MLCACHE not active!");
+#endif
 		seq_printf(m, "Hits: %ld | Misses: %ld\n", hits, misses);
 		return 0;
 }
